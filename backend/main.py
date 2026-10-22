@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -13,14 +14,39 @@ from tinyfish_search import TinyFishAuthenticationError, TinyFishUnavailableErro
 load_dotenv(Path(__file__).with_name(".env"), override=False)
 
 app = FastAPI(title="DawaWise API")
+
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+)
+
+
+def get_cors_origins(value: str | None = None) -> list[str]:
+    """Use exact configured browser origins; never enable wildcard CORS."""
+    raw_value = os.getenv("CORS_ORIGINS", "") if value is None else value
+    if not raw_value.strip():
+        return list(DEFAULT_CORS_ORIGINS)
+
+    origins = []
+    for item in raw_value.split(","):
+        origin = item.strip().rstrip("/")
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        if origin == "*" or parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
+            raise ValueError(f"Invalid CORS origin {item!r}; use exact http(s) origins separated by commas.")
+        if origin not in origins:
+            origins.append(origin)
+    if not origins:
+        raise ValueError("CORS_ORIGINS must contain at least one exact origin when configured.")
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
+    allow_origins=get_cors_origins(),
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],

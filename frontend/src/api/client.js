@@ -1,4 +1,11 @@
-const API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+function normalizeApiBaseUrl(value) {
+  return String(value || 'http://localhost:8000')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/api$/i, '');
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 
 export { API_BASE_URL };
 

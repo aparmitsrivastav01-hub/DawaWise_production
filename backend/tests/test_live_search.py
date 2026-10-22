@@ -24,6 +24,19 @@ def _mock_client(monkeypatch, handler):
     )
 
 
+def test_cors_origins_accept_exact_https_origins():
+    assert main.get_cors_origins(
+        "https://dawawise.vercel.app, https://dawawise-preview.vercel.app/"
+    ) == ["https://dawawise.vercel.app", "https://dawawise-preview.vercel.app"]
+
+
+def test_cors_origins_reject_wildcards_and_paths():
+    with pytest.raises(ValueError):
+        main.get_cors_origins("*")
+    with pytest.raises(ValueError):
+        main.get_cors_origins("https://dawawise.vercel.app/path")
+
+
 def _result(url, title):
     return {"url": url, "title": title, "snippet": title, "site_name": url.split("/")[2]}
 
