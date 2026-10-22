@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowDownRight, ArrowRight, ArrowUpRight, Check, ChevronDown, FilePlus2,
@@ -30,6 +30,8 @@ function App() {
   const [search, setSearch] = useState('');
   const [notice, setNotice] = useState('');
   const [activeNav, setActiveNav] = useState('Home');
+  const headerRef = useRef(null);
+  const menuButtonRef = useRef(null);
 
   const navItems = [
     ['Home', '#home'], ['How it Works', '#how-it-works'], ['Nearby Stores', '#nearby-stores'],
@@ -56,6 +58,27 @@ function App() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+
+    const handleOutsidePointer = (event) => {
+      if (!headerRef.current?.contains(event.target)) setMenuOpen(false);
+    };
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') {
+        setMenuOpen(false);
+        menuButtonRef.current?.focus();
+      }
+    };
+
+    document.addEventListener('pointerdown', handleOutsidePointer);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('pointerdown', handleOutsidePointer);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [menuOpen]);
+
   const runSearch = (value = search) => {
     const query = value.trim();
     if (!query) {
@@ -77,10 +100,10 @@ function App() {
 
   return (
     <main>
-      <header className="site-header">
+      <header className="site-header" ref={headerRef}>
         <div className="header-inner">
           <Logo />
-          <nav className={`main-nav ${menuOpen ? 'nav-open' : ''}`} aria-label="Main navigation">
+          <nav id="main-navigation" className={`main-nav ${menuOpen ? 'nav-open' : ''}`} aria-label="Main navigation">
             {navItems.map(([label, href]) => (
               <a key={label} className={activeNav === label ? 'active' : ''} href={href}
                 onClick={() => { setActiveNav(label); setMenuOpen(false); }}>
@@ -102,7 +125,15 @@ function App() {
               </div>
             )}
           </div>
-          <button className="mobile-menu" onClick={() => setMenuOpen(!menuOpen)} aria-label={menuOpen ? 'Close menu' : 'Open menu'}>
+          <button
+            ref={menuButtonRef}
+            className="mobile-menu"
+            type="button"
+            onClick={() => setMenuOpen((open) => !open)}
+            aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+            aria-expanded={menuOpen}
+            aria-controls="main-navigation"
+          >
             {menuOpen ? <X /> : <Menu />}
           </button>
         </div>
