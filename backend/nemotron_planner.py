@@ -69,6 +69,30 @@ class InvalidPlannerResponse(ValueError):
     """OpenRouter returned a successful response without a usable search plan."""
 
 
+def _repair_json_string_controls(value: str) -> str:
+    """Replace raw control characters inside quoted JSON strings with spaces."""
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    changed = False
+    for char in value:
+        if in_string and ord(char) < 0x20:
+            repaired.append(" ")
+            changed = True
+            continue
+        repaired.append(char)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+    return "".join(repaired) if changed else value
+
+
 def _plan_from_response(payload: Any, query: str) -> SearchPlan:
     """Parse common OpenRouter structured-output response shapes safely."""
     if not isinstance(payload, dict):
@@ -78,6 +102,8 @@ def _plan_from_response(payload: Any, query: str) -> SearchPlan:
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise InvalidPlannerResponse("response has no completion choice")
 
+    if choices[0].get("finish_reason") == "length":
+        raise InvalidPlannerResponse("model response was truncated at the token limit")
     message = choices[0].get("message")
     if not isinstance(message, dict):
         raise InvalidPlannerResponse("completion has no message object")
@@ -110,7 +136,14 @@ def _plan_from_response(payload: Any, query: str) -> SearchPlan:
                     text = text[4:].strip()
             if not text:
                 raise InvalidPlannerResponse("completion message content is empty")
-            plan = SearchPlan.model_validate_json(text)
+            try:
+                plan_data = json.loads(text)
+            except json.JSONDecodeError:
+                repaired_text = _repair_json_string_controls(text)
+                if repaired_text == text:
+                    raise
+                plan_data = json.loads(repaired_text)
+            plan = SearchPlan.model_validate(plan_data)
         else:
             raise InvalidPlannerResponse(
                 "completion message content is missing or has an unsupported format"
@@ -119,23 +152,6 @@ def _plan_from_response(payload: Any, query: str) -> SearchPlan:
     if plan.original_query != query:
         raise InvalidPlannerResponse("model changed the original query")
     return plan
-
-
-PLAN_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "original_query": {"type": "string"},
-        "brand_name": {"type": ["string", "null"]},
-        "generic_name": {"type": ["string", "null"]},
-        "strength": {"type": ["string", "null"]},
-        "dosage_form": {"type": ["string", "null"]},
-        "search_queries": {"type": "array", "items": {"type": "string"}, "minItems": 0, "maxItems": 2},
-        "needs_clarification": {"type": "boolean"},
-        "clarification_question": {"type": ["string", "null"]},
-    },
-    "required": ["original_query", "brand_name", "generic_name", "strength", "dosage_form", "needs_clarification", "clarification_question"],
-}
 
 
 def make_openrouter_client() -> httpx.AsyncClient:
@@ -148,19 +164,15 @@ async def plan_search(query: str, api_key: str) -> SearchPlan:
         {
             "role": "system",
             "content": (
-                "Interpret a medicine search and produce a web-search plan only. Do not provide prices, "
-                "medical advice, or unsupported product facts. Preserve the user's original query exactly. "
-                "Use null for brand name, generic name, strength, or dosage form unless identifiable from "
-                "the query itself. Do not ask which brand merely because the user supplied a clear generic "
-                "name and strength: a generic name plus strength is a safe search target even when form is "
-                "unspecified. Do not ask for a dosage form when live search can retrieve information across "
-                "forms; validation will reject non-comparable products. Ask a concise clarification question "
-                "only when the medicine identity cannot be searched safely (for example, the name could refer "
-                "to different active ingredients or combinations). For an unbranded generic query, create at "
-                "least one live web-search query using the known generic name and any known strength/form. "
-                "For a brand query, return up to two queries: one for the branded product's published MRP and "
-                "product details from manufacturer/trustworthy sources, and one for the same active ingredient, "
-                "strength and form's generic equivalent price from Jan Aushadhi/PMBI. Do not claim results are verified."
+                "Return one compact JSON object with exactly these fields: original_query, brand_name, "
+                "generic_name, strength, dosage_form, search_queries, needs_clarification, "
+                "clarification_question. Use null for unknown values and preserve original_query exactly. "
+                "Plan live web product-price searches only; never search for uses or side effects. For a "
+                "clear generic name plus strength, do not ask for a brand or dosage form. For a generic query, "
+                "include the known ingredient and strength/form plus medicine price in India. For a brand query, "
+                "use one query for its product MRP/details and one for the like-for-like Jan Aushadhi/PMBI "
+                "generic price. Ask clarification only if medicine identity itself is ambiguous. Return at most "
+                "two search_queries. Do not provide prices or medical advice."
             ),
         },
         {"role": "user", "content": query},
@@ -168,12 +180,10 @@ async def plan_search(query: str, api_key: str) -> SearchPlan:
     request = {
         "model": MODEL_ID,
         "temperature": 0,
-        "max_tokens": 500,
+        "max_tokens": 800,
         "messages": messages,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "medicine_search_plan", "strict": True, "schema": PLAN_SCHEMA},
-        },
+        "reasoning": {"effort": "minimal"},
+        "response_format": {"type": "json_object"},
     }
     try:
         async with make_openrouter_client() as client:

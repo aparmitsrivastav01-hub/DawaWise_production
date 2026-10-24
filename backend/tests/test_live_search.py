@@ -219,7 +219,8 @@ def _mock_openrouter(monkeypatch, content=None, status=200):
         assert request.headers["Authorization"] == "Bearer mocked-only"
         data = __import__("json").loads(request.read())
         assert data["model"] == nemotron_planner.MODEL_ID
-        assert data["response_format"]["type"] == "json_schema"
+        assert data["response_format"]["type"] == "json_object"
+        assert data["reasoning"]["effort"] == "minimal"
         return httpx.Response(status, json=body)
 
     monkeypatch.setattr(
@@ -333,6 +334,23 @@ def test_openrouter_missing_message_content_has_actionable_validation_error():
     with pytest.raises(nemotron_planner.InvalidPlannerResponse, match="content is missing"):
         nemotron_planner._plan_from_response(
             {"choices": [{"message": {}}]}, "Sample 500 mg tablets"
+        )
+
+
+def test_openrouter_unescaped_control_character_inside_json_string_is_repaired():
+    malformed_content = json.dumps(_plan()).replace("manufacturer MRP", "manufacturer\nMRP")
+    result = nemotron_planner._plan_from_response(
+        {"choices": [{"message": {"content": malformed_content}}]},
+        "Sample 500 mg tablets",
+    )
+    assert result.search_queries[0] == "Sample 500 mg tablets manufacturer MRP India"
+
+
+def test_openrouter_truncated_completion_is_reported_as_such():
+    with pytest.raises(nemotron_planner.InvalidPlannerResponse, match="truncated"):
+        nemotron_planner._plan_from_response(
+            {"choices": [{"finish_reason": "length", "message": {"content": "{"}}]},
+            "Sample 500 mg tablets",
         )
 
 
