@@ -99,6 +99,7 @@ async def search(payload: SearchRequest):
             generic_name=plan.generic_name,
             strength=plan.strength,
             dosage_form=plan.dosage_form,
+            brand_name=plan.brand_name,
         )
     except TinyFishAuthenticationError:
         return {"status": "error", "message": "TinyFish authentication failed. Check TINYFISH_API_KEY in backend/.env."}

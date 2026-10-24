@@ -200,10 +200,41 @@ def _infer_brand_name(product_name: str | None, ingredients: str | None) -> str 
     return brand or None
 
 
+_BRAND_MATCH_STOPWORDS = {
+    "tablet", "tablets", "tab", "tabs", "capsule", "capsules", "cap", "caps",
+    "syrup", "suspension", "injection", "cream", "ointment", "drops", "gel",
+    "solution", "powder", "medicine", "price", "india", "mrp", "manufacturer",
+    "strip", "pack", "box", "of", "mg", "mcg", "ug", "g", "ml", "iu",
+}
+
+
+def _brand_matches(requested_brand: str | None, record: dict) -> bool:
+    """Require each requested brand word to appear in the extracted product evidence."""
+    if not requested_brand:
+        return True
+    requested = {
+        token for token in re.findall(r"[a-z]+", requested_brand.lower())
+        if token not in _BRAND_MATCH_STOPWORDS
+    }
+    if not requested:
+        return True
+    evidence = " ".join(str(record.get(field) or "") for field in ("brand_name", "name"))
+    observed = {
+        token for token in re.findall(r"[a-z]+", evidence.lower())
+        if token not in _BRAND_MATCH_STOPWORDS
+    }
+    return requested.issubset(observed)
+
+
 def _ingredient_key(value: str | None) -> tuple[str, ...]:
     if not value:
         return ()
     value = re.sub(r"\([^)]*\)", " ", value.lower())
+    value = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mcg|μg|µg|mg|g|ml|iu|%)\b", " ", value)
+    value = re.sub(
+        r"\b(?:contains?|exactly|each|of|per|tablet|tablets|tab|tabs|capsule|capsules|cap|caps|ip|bp|usp)\b",
+        " ", value,
+    )
     parts = re.split(r"\s*(?:\+|,|/|\band\b)\s*", value)
     return tuple(sorted(re.sub(r"[^a-z0-9]", "", part) for part in parts if re.sub(r"[^a-z0-9]", "", part)))
 
@@ -625,6 +656,7 @@ async def search_medicine(
     generic_name: str | None = None,
     strength: str | None = None,
     dosage_form: str | None = None,
+    brand_name: str | None = None,
 ) -> dict:
     if search_queries is None:
         brand_query = f'{query} medicine manufacturer MRP composition strength dosage form pack size India'
@@ -673,6 +705,20 @@ async def search_medicine(
             )
             log_event("tinyfish_search", status="success", branded_candidates=len(brand_results), jan_candidates=len(jan_results))
             brand_records = await _retrieve_kind(client, api_key, brand_results, "brand")
+            if brand_name:
+                candidate_count = len(brand_records)
+                brand_records = [record for record in brand_records if _brand_matches(brand_name, record)]
+                for record in brand_records:
+                    if not record.get("brand_name"):
+                        record["brand_name"] = brand_name
+                log_event(
+                    "brand_validation",
+                    status="matched" if brand_records else "no_match",
+                    requested_brand=brand_name,
+                    candidate_count=candidate_count,
+                    matching_count=len(brand_records),
+                    reason=None if brand_records else "requested_brand_not_found_in_product_evidence",
+                )
             if has_jan_attributes and brand_records and brand_records[0].get("pack_size"):
                 jan_pack_query = (
                     f"{generic_name} {strength} {dosage_form} {brand_records[0]['pack_size']} "
@@ -749,6 +795,15 @@ async def search_medicine(
         extracted_records=len(jan_records),
         extraction_status="no_verified_product_price" if not jan_records else "records_validated",
     )
+    if brand_name and not brand_records:
+        log_event("validation", status="unavailable", reason="requested_brand_not_found")
+        log_event("savings_calculation", status="unavailable", reason="Requested brand was not verified")
+        return {
+            "status": "not_found",
+            "message": f"No trustworthy listing for the requested brand {brand_name} was found. Try another brand or search by the generic ingredient.",
+            "jan_price_status": "unavailable" if not jan_records else "available_without_brand_match",
+            "jan_price_sources_checked": jan_sources_checked,
+        }
     if not jan_records:
         log_event("jan_price", status="unavailable", source="pmbi.co.in", reason="no_official_product_price_extracted")
     elif not any(item.get("pack_key") for item in jan_records):

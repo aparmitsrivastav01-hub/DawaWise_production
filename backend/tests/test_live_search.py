@@ -286,13 +286,16 @@ def test_generic_name_and_strength_without_brand_proceeds_to_tinyfish(monkeypatc
         "generic_name": "metformin",
         "strength": "500 mg",
         "dosage_form": None,
+        "brand_name": None,
     }
 
 
 def test_brand_specific_plan_proceeds_to_live_retrieval(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "mocked-only")
     monkeypatch.setenv("TINYFISH_API_KEY", "mock-tinyfish")
-    _mock_openrouter(monkeypatch, content=json.dumps(_plan("Dolo 650")))
+    plan = _plan("Dolo 650")
+    plan["brand_name"] = "Dolo"
+    _mock_openrouter(monkeypatch, content=json.dumps(plan))
     captured = {}
 
     async def fake_search_medicine(query, api_key, search_queries=None, **attributes):
@@ -304,6 +307,28 @@ def test_brand_specific_plan_proceeds_to_live_retrieval(monkeypatch):
     assert payload["status"] == "matched"
     assert captured["query"] == "Dolo 650"
     assert len(captured["search_queries"]) == 2
+    assert captured["brand_name"] == "Dolo"
+
+
+@pytest.mark.parametrize(
+    ("requested", "record", "expected"),
+    [
+        ("Crocin 650", {"brand_name": "Dolo", "name": "Dolo 650 Tablet"}, False),
+        ("Crocin", {"brand_name": "CROCIN", "name": "Crocin 650 Tablet"}, True),
+        ("Glycomet", {"brand_name": "Glycomet", "name": "Glycomet 500 SR Tablet"}, True),
+    ],
+)
+def test_requested_brand_must_match_product_evidence(requested, record, expected):
+    assert tinyfish_search._brand_matches(requested, record) is expected
+
+
+def test_ingredient_sentence_normalizes_to_the_active_ingredient():
+    assert tinyfish_search._ingredient_key(
+        "Contains exactly 650 mg of Paracetamol IP (Acetaminophen) per tablet."
+    ) == tinyfish_search._ingredient_key("Paracetamol")
+    assert tinyfish_search._ingredient_key("Amoxicillin 500 mg + clavulanic acid 125 mg") == (
+        "amoxicillin", "clavulanicacid",
+    )
 
 
 def test_search_plan_accepts_generic_target_without_brand():
@@ -426,6 +451,7 @@ def test_empty_search_query_entries_are_filtered_before_tinyfish(monkeypatch):
         "generic_name": "paracetamol",
         "strength": "500 mg",
         "dosage_form": "tablets",
+        "brand_name": "Sample",
     }
 
 
@@ -546,6 +572,28 @@ def test_no_official_pmbi_match_returns_unavailable(monkeypatch):
     assert tinyfish_search.PMBI_PRODUCT_LIST_URL in payload["medicine"]["jan_price_sources_checked"]
     assert all(url in payload["medicine"]["jan_price_sources_checked"] for url in tinyfish_search.JAN_PORTFOLIO_URLS)
     assert payload["medicine"]["net_savings"]["available"] is False
+
+
+def test_requested_brand_mismatch_does_not_return_another_brand(monkeypatch):
+    brand_url = "https://www.1mg.com/drugs/dolo-650-tablet-123"
+    brand = {
+        "url": brand_url,
+        "title": "Dolo 650 Tablet",
+        "content": {
+            "title": "Dolo 650 Tablet",
+            "text": "Brand: Dolo\nActive ingredient: Paracetamol\nStrength: 650 mg\nDosage form: tablet\nPack size: 15 tablets\nMRP: ₹32.28",
+        },
+    }
+    _mock_official_search_fetch(monkeypatch, brand_page=brand)
+    _mock_pmbi_product_list(monkeypatch, _pmbi_table([]))
+    payload = asyncio.run(tinyfish_search.search_medicine(
+        "Crocin 650", "mock-key", ["Crocin 650 mg tablet price"],
+        generic_name="Paracetamol", strength="650 mg", dosage_form="tablet",
+        brand_name="Crocin",
+    ))
+    assert payload["status"] == "not_found"
+    assert "requested brand Crocin" in payload["message"]
+    assert "Dolo" not in payload["message"]
 
 
 def test_retail_page_title_contamination_and_discount_percent_are_rejected():
