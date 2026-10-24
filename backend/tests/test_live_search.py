@@ -313,6 +313,29 @@ def test_search_plan_accepts_generic_target_without_brand():
     assert validated.generic_name == "metformin"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"content": json.dumps(_plan())},
+        {"content": [{"type": "text", "text": json.dumps(_plan())}]},
+        {"parsed": _plan()},
+        {"content": f"```json\n{json.dumps(_plan())}\n```"},
+    ],
+)
+def test_openrouter_structured_output_shapes_are_accepted(message):
+    result = nemotron_planner._plan_from_response(
+        {"choices": [{"message": message}]}, "Sample 500 mg tablets"
+    )
+    assert result.generic_name == "paracetamol"
+
+
+def test_openrouter_missing_message_content_has_actionable_validation_error():
+    with pytest.raises(nemotron_planner.InvalidPlannerResponse, match="content is missing"):
+        nemotron_planner._plan_from_response(
+            {"choices": [{"message": {}}]}, "Sample 500 mg tablets"
+        )
+
+
 def test_malformed_nemotron_json_returns_safe_error_and_skips_tinyfish(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "mocked-only")
     monkeypatch.setenv("TINYFISH_API_KEY", "mock-tinyfish")

@@ -65,6 +65,62 @@ class NemotronUnavailableError(Exception):
     """Safe-to-report failure from OpenRouter or its response."""
 
 
+class InvalidPlannerResponse(ValueError):
+    """OpenRouter returned a successful response without a usable search plan."""
+
+
+def _plan_from_response(payload: Any, query: str) -> SearchPlan:
+    """Parse common OpenRouter structured-output response shapes safely."""
+    if not isinstance(payload, dict):
+        raise InvalidPlannerResponse("response body must be a JSON object")
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise InvalidPlannerResponse("response has no completion choice")
+
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise InvalidPlannerResponse("completion has no message object")
+    if message.get("refusal"):
+        raise InvalidPlannerResponse("model refused to create a search plan")
+
+    # Some OpenRouter/model adapters expose schema output as `parsed`, while
+    # others put JSON text in `content`. Accept both without relying on a single
+    # provider-specific serialization shape.
+    parsed = message.get("parsed")
+    if isinstance(parsed, dict):
+        plan = SearchPlan.model_validate(parsed)
+    else:
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type", "text") == "text"
+                and isinstance(block.get("text", ""), str)
+            )
+        if isinstance(content, dict):
+            plan = SearchPlan.model_validate(content)
+        elif isinstance(content, str):
+            text = content.strip()
+            if text.startswith("```") and text.endswith("```"):
+                text = text[3:-3].strip()
+                if text[:4].lower() == "json" and len(text) > 4 and text[4].isspace():
+                    text = text[4:].strip()
+            if not text:
+                raise InvalidPlannerResponse("completion message content is empty")
+            plan = SearchPlan.model_validate_json(text)
+        else:
+            raise InvalidPlannerResponse(
+                "completion message content is missing or has an unsupported format"
+            )
+
+    if plan.original_query != query:
+        raise InvalidPlannerResponse("model changed the original query")
+    return plan
+
+
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -136,12 +192,7 @@ async def plan_search(query: str, api_key: str) -> SearchPlan:
             log_event("nemotron_result", status="upstream_error", http_status=response.status_code)
             raise NemotronUnavailableError("Nemotron query planning is temporarily unavailable. Please retry.")
         payload = response.json()
-        content = payload["choices"][0]["message"]["content"]
-        if not isinstance(content, str):
-            raise ValueError("Expected JSON text")
-        plan = SearchPlan.model_validate_json(content)
-        if plan.original_query != query:
-            raise ValueError("Model changed the original query")
+        plan = _plan_from_response(payload, query)
     except NemotronUnavailableError:
         raise
     except httpx.TimeoutException:
@@ -164,9 +215,26 @@ async def plan_search(query: str, api_key: str) -> SearchPlan:
         raise NemotronUnavailableError(
             f"Nemotron returned an invalid search plan ({summary}). Please retry."
         ) from None
-    except (ValueError, TypeError, KeyError, IndexError):
-        log_event("nemotron_result", status="invalid_response")
-        raise NemotronUnavailableError("Nemotron returned an invalid search plan. Please retry.") from None
+    except InvalidPlannerResponse as exc:
+        reason = str(exc)
+        log_event("nemotron_result", status="invalid_response", validation_errors=[{
+            "field": "response",
+            "code": "invalid_response_shape",
+            "message": reason,
+        }])
+        raise NemotronUnavailableError(
+            f"Nemotron returned an invalid search plan (response: {reason}). Please retry."
+        ) from None
+    except (ValueError, TypeError, KeyError, IndexError) as exc:
+        reason = str(exc) or type(exc).__name__
+        log_event("nemotron_result", status="invalid_response", validation_errors=[{
+            "field": "response",
+            "code": "invalid_response",
+            "message": reason[:240],
+        }])
+        raise NemotronUnavailableError(
+            f"Nemotron returned an invalid search plan (response: {reason[:160]}). Please retry."
+        ) from None
 
     log_event(
         "nemotron_result",
